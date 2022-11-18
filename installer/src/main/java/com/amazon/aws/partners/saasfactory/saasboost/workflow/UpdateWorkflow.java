@@ -17,6 +17,7 @@
 package com.amazon.aws.partners.saasfactory.saasboost.workflow;
 
 import com.amazon.aws.partners.saasfactory.saasboost.Constants;
+import com.amazon.aws.partners.saasfactory.saasboost.GitVersionInfo;
 import com.amazon.aws.partners.saasfactory.saasboost.Keyboard;
 import com.amazon.aws.partners.saasfactory.saasboost.SaaSBoostInstall;
 import com.amazon.aws.partners.saasfactory.saasboost.Utils;
@@ -63,11 +64,17 @@ public class UpdateWorkflow extends AbstractWorkflow {
     private final Environment environment;
     private final Path workingDir;
     private final AwsClientBuilderFactory clientBuilderFactory;
+    private final boolean doesCfnMacroResourceExist;
 
-    public UpdateWorkflow(Path workingDir, Environment environment, AwsClientBuilderFactory clientBuilderFactory) {
+    public UpdateWorkflow(
+            Path workingDir, 
+            Environment environment, 
+            AwsClientBuilderFactory clientBuilderFactory, 
+            boolean doesCfnMacroResourceExist) {
         this.environment = environment;
         this.workingDir = workingDir;
         this.clientBuilderFactory = clientBuilderFactory;
+        this.doesCfnMacroResourceExist = doesCfnMacroResourceExist;
     }
 
     private boolean confirm() {
@@ -105,13 +112,10 @@ public class UpdateWorkflow extends AbstractWorkflow {
             LOGGER.debug("executing UpdateAction: {}", action);
             switch (action) {
                 case CLIENT: {
-                    outputMessage("Updating Admin UI web application..");
-                    SaaSBoostInstall.buildAndCopyWebApp(
-                            workingDir,
-                            clientBuilderFactory.cloudFormationBuilder().build(),
-                            clientBuilderFactory.s3Builder().build(),
-                            environment.getName(),
-                            environment.getAccountId());
+                    outputMessage("Updating admin web application...");
+                    SaaSBoostInstall.copyAdminWebAppSourceToS3(workingDir,
+                            environment.getArtifactsBucket().getBucketName(),
+                            clientBuilderFactory.s3Builder().build());
                     break;
                 }
                 case CUSTOM_RESOURCES:
@@ -188,6 +192,12 @@ public class UpdateWorkflow extends AbstractWorkflow {
         // Update the version number
         outputMessage("Updating Version parameter to " + Constants.VERSION);
         cloudFormationParamMap.put("Version", Constants.VERSION);
+
+        // If CloudFormation macro resources do not exist, that means that another environment that had previously
+        // owned those resources was deleted. In this case we should make sure to create them.
+        if (!doesCfnMacroResourceExist) {
+            cloudFormationParamMap.put("CreateMacroResources", Boolean.TRUE.toString());
+        }
 
         // Always call update stack
         outputMessage("Executing CloudFormation update stack on: " + environment.getBaseCloudFormationStackName());
@@ -272,21 +282,38 @@ public class UpdateWorkflow extends AbstractWorkflow {
         // list all staged and committed changes against the last updated commit
         String versionParameter = cloudFormationParamMap.get("Version");
         LOGGER.debug("Found existing version: {}", versionParameter);
-        // if Version was created with "Commit time", we need to remove that to get commit hash
-        if (versionParameter.contains(",")) {
-            versionParameter = versionParameter.split(",")[0];
+        String commitHash = null;
+        if (versionParameter.startsWith("{") && versionParameter.endsWith("}")) {
+            // we know this is a JSON-created versionParameter, so attempt deserialization to GitVersionInfo
+            GitVersionInfo parsedInfo = Utils.fromJson(versionParameter, GitVersionInfo.class);
+            if (parsedInfo != null) {
+                commitHash = parsedInfo.getCommit();
+            } else {
+                // we cannot continue with an update without being able to parse the version information
+                throw new RuntimeException("Unable to continue with update; cannot parse VERSION as JSON: "
+                        + versionParameter);
+            }
+        } else {
+            // this versionParameter was created before the JSON migration of git information,
+            // so parse using the old logic
+
+            // if Version was created with "Commit time", we need to remove that to get commit hash
+            if (versionParameter.contains(",")) {
+                versionParameter = versionParameter.split(",")[0];
+            }
+            // if last update or install was created with uncommitted code, assume we're working from
+            // the last information we have: the commit on top of which the uncommitted code was written
+            if (versionParameter.contains("-dirty")) {
+                versionParameter = versionParameter.split("-")[0];
+            }
+            commitHash = versionParameter;
         }
-        // if last update or install was created with uncommitted code, assume we're working from
-        // the last information we have: the commit on top of which the uncommitted code was written
-        if (versionParameter.contains("-dirty")) {
-            versionParameter = versionParameter.split("-")[0];
-        }
-        LOGGER.debug("Parsed version to: {}", versionParameter);
+        LOGGER.debug("Parsed commit hash to: {}", commitHash);
         List<Path> changedPaths = new ArrayList<>();
         // -b               : ignore whitespace-only changes
         // --name-only      : only output the filename (for easy parsing)
-        // $(version)..HEAD : output changes since $(version)
-        String gitDiffCommand = "git diff -b --name-only " + versionParameter;
+        // $(version)       : output changes since $(version)
+        String gitDiffCommand = "git diff -b --name-only " + commitHash;
         changedPaths.addAll(listPathsFromGitCommand(gitDiffCommand));
 
         // list all untracked changes (i.e. net new un-added files)
@@ -401,6 +428,9 @@ public class UpdateWorkflow extends AbstractWorkflow {
                     switch (pathAction) {
                         case RESOURCES: {
                             if (target.endsWith(".yaml")) {
+                                LOGGER.debug("Adding new target {} to UpdateAction {}", target, pathAction);
+                                pathAction.addTarget(target);
+                            } else if (target.endsWith("keycloak/Dockerfile")) {
                                 LOGGER.debug("Adding new target {} to UpdateAction {}", target, pathAction);
                                 pathAction.addTarget(target);
                             } else {

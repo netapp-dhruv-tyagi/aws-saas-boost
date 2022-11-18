@@ -157,7 +157,7 @@ export function ApplicationComponent(props) {
       ...thisService,
       name: thisService?.name || serviceName,
       path: thisService?.path || '/*',
-      public: thisService?.public || true,
+      public: thisService ? thisService.public : true,
       healthCheckUrl: thisService?.healthCheckUrl || '/',
       containerPort: thisService?.containerPort || 0,
       containerTag: thisService?.containerTag || 'latest',
@@ -256,6 +256,10 @@ export function ApplicationComponent(props) {
   // TODO public service paths cannot match
   const validationSpecs = Yup.object({
     name: Yup.string().required('Name is a required field.'),
+    domainName: Yup.string().matches(
+      /^$|(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{0,62}[a-zA-Z0-9]\.)+[a-zA-Z]{2,63}$)/,
+      'Domain Name is not in valid format.'
+    ),
     services: Yup.array(
       Yup.object({
         public: Yup.boolean().required(),

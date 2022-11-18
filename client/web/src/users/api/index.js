@@ -20,7 +20,7 @@ import appConfig from '../../config/appConfig'
 
 const { apiUri } = appConfig
 const apiServer = axios.create({
-  baseURL: `${apiUri}/users`,
+  baseURL: `${apiUri}/sysusers`,
   headers: {
     common: {
       'Content-Type': 'application/json',
@@ -35,7 +35,7 @@ apiServer.interceptors.request.use(async (r) => {
   console.log(r)
   //Obtain and pass along Authorization token
   const authorizationToken = await fetchAccessToken()
-  r.headers.Authorization = authorizationToken
+  r.headers.Authorization = "Bearer " + authorizationToken
 
   //Configure the AbortSignal
   r.signal.onabort = () => {
